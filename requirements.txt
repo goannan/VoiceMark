@@ -2,3 +2,5 @@ torchaudio
 beartype
 einops
 omegaconf
+gradio==4.25.0
+gradio_client==0.8.1

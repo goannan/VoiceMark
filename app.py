@@ -28,7 +28,7 @@ solver.load_model(checkpoint_dir="./", checkpoint_name="voicemark.pth", strict=T
 # Gradio interface
 with gr.Blocks() as demo:
     gr.Markdown(
-        "# VoiceMark: Zero-Shot Voice Cloning-Resistant Watermarking Approach Leveraging Speaker-Specific Latents"
+        "## VoiceMark: Zero-Shot Voice Cloning-Resistant Watermarking Approach Leveraging Speaker-Specific Latents"
     )
     with gr.Column():
         gr.Image(

@@ -3,3 +3,4 @@ beartype
 einops
 omegaconf
 gradio==4.25.0
+pydantic==2.10.6

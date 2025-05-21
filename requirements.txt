@@ -2,4 +2,4 @@ torchaudio
 beartype
 einops
 omegaconf
-gradio==4.32.2
+gradio==4.25.0

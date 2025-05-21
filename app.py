@@ -134,4 +134,4 @@ with gr.Blocks() as demo:
     )
 
 # Launch the Gradio app
-demo.launch()
+demo.launch(ssr=False)

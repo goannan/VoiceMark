@@ -23,7 +23,7 @@ watermarks = {
 
 # Initialize WatermarkSolver model
 solver = WatermarkSolver()
-solver.load_model(checkpoint_dir="./", checkpoint_name="voicemark.pth", strict=True)
+solver.load_model(checkpoint_dir="../", checkpoint_name="voicemark.pth", strict=True)
 
 # Gradio interface
 with gr.Blocks() as demo:

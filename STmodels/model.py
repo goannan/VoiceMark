@@ -97,36 +97,43 @@ class SpeechTokenizer(nn.Module):
         message: torch.Tensor = None,
     ):
         """
+        Forward pass of the watermarked VQ-VAE.
 
         Parameters
         ----------
-        x : torch.tensor
-            Input wavs. Shape: (batch, channels, timesteps).
+        x : torch.Tensor
+            Input waveforms. Shape: (batch, channels, timesteps).
         n_q : int, optional
-            Number of quantizers in RVQ used to encode. The default is all layers.
+            Number of quantizers in RVQ used for encoding. Default is all layers.
         layers : list[int], optional
-            Layers of RVQ should return quantized result. The default is the first layer.
+            Specific RVQ layers to return quantized outputs. Default is [0].
+        msg_processor : WMEmbedder, optional
+            Module for embedding the watermark message into quantized features.
+        message : torch.Tensor, optional
+            Binary message or watermark to embed.
 
         Returns
         -------
-        o : torch.tensor
-            Output wavs. Shape: (batch, channels, timesteps).
-        commit_loss : torch.tensor
-            Commitment loss from residual vector quantizers.
-        feature : torch.tensor
-            Output of RVQ's first layer. Shape: (batch, timesteps, dimension)
-
+        o : torch.Tensor
+            Reconstructed audio without watermark. Shape: (batch, channels, timesteps).
+        o_wm : torch.Tensor
+            Reconstructed audio with embedded watermark. Shape: (batch, channels, timesteps).
+        acoustic : torch.Tensor
+            Acoustic residual representation (encoder output minus the first quantized layer).
+        acoustic_wm : torch.Tensor
+            Acoustic representation with the watermark embedded.
         """
-        with torch.no_grad():
-            e = self.encoder(x)
-            quantized_full, _, _, quantized_list = self.quantizer(
-                e, n_q=n_q, layers=[0, 1, 2, 3, 4, 5, 6, 7], st=0
-            )
-            # semantic, _, _, _ = self.quantizer(e, n_q=1, st=0)
-            # acoustic = e - semantic
-            o = self.decoder(quantized_full)
 
-        subset = quantized_list[1:]
+        e = self.encoder(x)
+        quantized_full, _, _, quantized_list = self.quantizer(
+            e, n_q=n_q, layers=[0, 1, 2, 3, 4, 5, 6, 7], st=0
+        )
+        # semantic, _, _, _ = self.quantizer(e, n_q=1, st=0)
+        # acoustic = e - semantic
+        o = self.decoder(quantized_full)
+
+        device = message.device  # 或 self.device
+        subset = [x.to(device) for x in quantized_list[1:]]  # 确保全都在 GPU
 
         # half_len = len(subset) // 2
         # selected_for_processing = random.sample(subset, half_len)
@@ -138,10 +145,10 @@ class SpeechTokenizer(nn.Module):
 
         acoustic_wm = sum(msg_processor(x, message) for x in subset)
 
-        acoustic = e - quantized_list[0]
+        acoustic = e - quantized_list[0].to(device)  # quantized_list[0] 也要在 GPU
 
         # e_wm = acoustic_wm
-        e_wm = quantized_list[0] + acoustic_wm
+        e_wm = quantized_list[0].to(device) + acoustic_wm
 
         o_wm = self.decoder(e_wm)
 
@@ -159,8 +166,7 @@ class SpeechTokenizer(nn.Module):
 
         Returns
         -------
-        quantized_list : list[torch.tensor]
-            Quantized of required layers.
+        acoustic: encoder(x) - semantic (batch, channels, timesteps)
 
         """
         e = self.encoder(x)

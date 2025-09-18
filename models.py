@@ -1,6 +1,4 @@
-import torch
-import torch.nn as nn
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch.nn.functional as F
 import torch
@@ -61,7 +59,8 @@ class WMDetector(nn.Module):
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of the detector.
-
+        Args:
+            x: shape [batch input_channels, time_steps]
         Returns:
             logits (torch.Tensor): Watermark detection logits of shape [batch, seq_len].
             chunk_logits (torch.Tensor): Byte-level classification logits of shape [batch, nchunks, 256].
@@ -203,97 +202,37 @@ class WMEmbedder(nn.Module):
         Returns:
             A tensor [batch, input_dim, seq_len] with watermark injected.
         """
+        device = hidden.device  # embedder 所在的 device，保证所有张量在同一 GPU/CPU 上
         b, in_dim, seq_len = hidden.shape
 
         # 1) Project input features to [b, seq_len, hidden_dim]
-        hidden_projected = self.input_projection(
-            hidden.permute(0, 2, 1)
-        )  # => [b, seq_len, hidden_dim]
+        hidden_projected = self.input_projection(hidden.permute(0, 2, 1))  # [b, seq_len, hidden_dim]
 
-        # 2) Convert the msg bits into a sequence of chunk embeddings
-        #    We keep each chunk as one token => [b, nchunks, hidden_dim]
+        # 2) Convert msg bits into chunk embeddings
         chunk_emb_list = []
         for i in range(self.nchunks):
-            # msg[:, i*nchunk_size : (i+1)*nchunk_size] => shape [b, nchunk_size]
-            chunk_bits = msg[:, i * self.nchunk_size : (i + 1) * self.nchunk_size]
-            chunk_val = torch.zeros_like(chunk_bits[:, 0])  # shape [b]
+            chunk_bits = msg[:, i * self.nchunk_size: (i + 1) * self.nchunk_size].to(device)
+            chunk_val = torch.zeros(chunk_bits.size(0), device=device, dtype=torch.long)
             for bit_idx in range(self.nchunk_size):
-                # shift bits
-                chunk_val += chunk_bits[:, bit_idx] << bit_idx
+                chunk_val += chunk_bits[:, bit_idx].long() << bit_idx
 
             # embedding => [b, hidden_dim]
             chunk_emb = self.msg_embeddings[i](chunk_val)
             chunk_emb_list.append(chunk_emb.unsqueeze(1))  # => [b,1,hidden_dim]
 
         # Concat => [b, nchunks, hidden_dim]
-        chunk_emb_seq = torch.cat(chunk_emb_list, dim=1)  # [b, nchunks, hidden_dim]
+        chunk_emb_seq = torch.cat(chunk_emb_list, dim=1)
 
-        # 3) Use chunk_emb_seq as memory, hidden_projected as target for TransformerDecoder
-        #
-        # TransformerDecoder forward signature:
-        #   transformer_decoder(tgt, memory, ...)
-        #   => [b, seq_len, hidden_dim]
-        x_decoded = self.transformer_decoder(
-            tgt=hidden_projected,  # [b, seq_len, hidden_dim]
-            memory=chunk_emb_seq,  # [b, nchunks, hidden_dim]
-        )
+        # 3) TransformerDecoder forward
+        x_decoded = self.transformer_decoder(tgt=hidden_projected, memory=chunk_emb_seq)
 
-        # 4) Project back to input_dim => [b, seq_len, input_dim]
+        # 4) Project back to input_dim
         x_output = self.output_projection(x_decoded)
 
         # 5) permute back to [b, input_dim, seq_len]
-        x_output = x_output.permute(0, 2, 1)  # => [b, input_dim, seq_len]
+        x_output = x_output.permute(0, 2, 1)
 
-        # 6) (Optional) Residual with original hidden
-        x_output = x_output + hidden
+        # 6) Residual
+        x_output = x_output + hidden.to(device)
 
         return x_output
-
-
-from speechtokenizer import SpeechTokenizer
-
-
-class SBW(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.nbits = 16
-        config_path = (
-            "speechtokenizer/pretrained_model/speechtokenizer_hubert_avg_config.json"
-        )
-        ckpt_path = "speechtokenizer/pretrained_model/SpeechTokenizer.pt"
-        self.st_model = SpeechTokenizer.load_from_checkpoint(config_path, ckpt_path)
-        self.msg_processor = WMEmbedder(
-            nbits=16,
-            input_dim=1024,
-            nchunk_size=4,
-        )
-        self.detector = WMDetector(
-            1024,
-            16,
-            nchunk_size=4,
-        )
-
-    def detect_watermark(
-        self, x: torch.Tensor, return_logits=False
-    ) -> Tuple[float, torch.Tensor]:
-        embedding = self.st_model.forward_feature(x)
-        if return_logits:
-            return self.detector(embedding)
-        return self.detector.detect_watermark(embedding)
-
-    def forward(
-        self,
-        speech_input: torch.Tensor,
-        message: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
-        recon, recon_wm, acoustic, acoustic_wm = self.st_model(
-            speech_input, msg_processor=self.msg_processor, message=message
-        )
-        wav_length = min(speech_input.size(-1), recon_wm.size(-1))
-        speech_input = speech_input[..., :wav_length]
-        recon = recon[..., :wav_length]
-        recon_wm = recon_wm[..., :wav_length]
-        return {
-            "recon": recon,
-            "recon_wm": recon_wm,
-        }

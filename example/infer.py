@@ -1,10 +1,10 @@
-from models import SBW
+from SBW import SBW
 import torchaudio
 import torch
 import os
-from pathlib import Path
-import soundfile as sf
-import librosa
+# from pathlib import Path
+# import soundfile as sf
+# import librosa
 
 def hamming_distance(s1, s2, base=2):
     """
@@ -87,42 +87,64 @@ class WatermarkSolver:
         self.nbits = 16
         self.model = SBW()
 
-    def load_model(
-        self, checkpoint_dir, checkpoint_name, strict=False
-    ):
+    def load_model(self, checkpoint_dir, checkpoint_name, strict=False):
         """
-        Load the latest model weights from the checkpoint directory.
+        Load the model weights from a checkpoint file.
+        Compatible with both 'model_state_dict' format and
+        {'embedder','detectors'} format.
         """
-        checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith(".pth")]
-        if not checkpoint_files:
-            print("No checkpoint files found in the directory.")
-            return
+        import os, torch
 
         checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
-        print(f"Loading model weights from {checkpoint_path}...")
+        if not os.path.exists(checkpoint_path):
+            print(f"❌ Checkpoint {checkpoint_path} not found.")
+            return
 
-        # Load the checkpoint
-        checkpoint = torch.load(checkpoint_path,map_location=torch.device('cpu'),weights_only=False)
+        print(f"🔄 Loading model weights from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
 
-        # Load model state dict with strict=False to allow missing keys (semantic_encoder)
-        model_state_dict = checkpoint["model_state_dict"]
+        # -------- 1. 兼容不同的 checkpoint 格式 --------
+        if "model_state_dict" in checkpoint:
+            # 老版本
+            model_state_dict = checkpoint["model_state_dict"]
+        elif "embedder" in checkpoint and "detectors" in checkpoint:
+            # 新版本：分别保存的
+            model_state_dict = {}
+            for k, v in checkpoint["embedder"].items():
+                model_state_dict[f"msg_processor.{k}"] = v
+            for k, v in checkpoint["detectors"].items():
+                model_state_dict[f"detector.{k}"] = v
+        else:
+            # 兜底，直接认为就是 state_dict
+            model_state_dict = checkpoint
 
+        # -------- 2. 清理 "module." 前缀 --------
         new_state_dict = {}
         for k, v in model_state_dict.items():
             new_key = k.replace("module.", "")
             new_state_dict[new_key] = v
+
+        # -------- 3. 严格模式控制 --------
         if not strict:
             new_state_dict = {
                 k: v
                 for k, v in new_state_dict.items()
-                if k in self.model.state_dict()
-                and self.model.state_dict()[k].shape == v.shape
+                if k in self.model.state_dict() and self.model.state_dict()[k].shape == v.shape
             }
-        self.model.load_state_dict(new_state_dict, strict=False)
 
-        print("Model state dict loaded successfully.")
-        self.epoch = checkpoint["epoch"]
-        print(f"Checkpoint loaded from epoch {checkpoint['epoch']}.")
+        # -------- 4. 加载模型 --------
+        missing, unexpected = self.model.load_state_dict(new_state_dict, strict=False)
+        print("✅ Model state dict loaded successfully.")
+        print("   Missing keys:", missing)
+        print("   Unexpected keys:", unexpected)
+
+        # -------- 5. epoch 信息（如果有的话） --------
+        if "epoch" in checkpoint:
+            self.epoch = checkpoint["epoch"]
+            print(f"📌 Checkpoint loaded from epoch {checkpoint['epoch']}.")
+        else:
+            self.epoch = -1
+            print("⚠️ No 'epoch' found in checkpoint.")
 
     def infer_for_ui(self, input_audio_path, watermark, output_audio_path="tmp"):
         message_str = watermark

@@ -2,6 +2,9 @@ from models import SBW
 import torchaudio
 import torch
 import os
+from pathlib import Path
+import soundfile as sf
+import librosa
 
 def hamming_distance(s1, s2, base=2):
     """
@@ -173,3 +176,46 @@ class WatermarkSolver:
             )
 
         return detect_prob,detected_id
+
+    def embed_watermark(self, waveform, message, sample_rate: int = 16000):
+        message_str = message
+        self.model.eval()
+
+        if sample_rate != self.sample_rate:
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=sample_rate, new_freq=self.sample_rate
+            )
+            waveform = resampler(waveform)
+
+        waveform = waveform[:1].to(self.device).unsqueeze(1)
+        message = string_to_message(message_str=message_str, batch_size=1).to(
+            self.device
+        )
+
+        with torch.no_grad():
+            output = self.model(
+                waveform,
+                message=message,
+            )
+            y_wm = output["recon_wm"]
+
+        return y_wm
+
+    def decode_watermark(self, waveform, sample_rate: int = 16000):
+        self.model.eval()
+
+        if sample_rate != self.sample_rate:
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=sample_rate, new_freq=self.sample_rate
+            )
+            waveform = resampler(waveform)
+
+        waveform = waveform[:1].to(self.device).unsqueeze(1)
+
+        with torch.no_grad():
+            detect_prob, detected_message_tensor, _ = self.model.detect_watermark(waveform)
+            detected_id = "".join(
+                map(str, detected_message_tensor.squeeze(0).cpu().numpy().tolist())
+            )
+
+        return detect_prob, detected_id

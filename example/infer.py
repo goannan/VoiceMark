@@ -101,7 +101,7 @@ class WatermarkSolver:
             return
 
         print(f"🔄 Loading model weights from {checkpoint_path}...")
-        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
 
         # -------- 1. 兼容不同的 checkpoint 格式 --------
         if "model_state_dict" in checkpoint:

@@ -29,7 +29,7 @@ def vc_simulated_augmentation(audio, sample_rate=16000, orig_audio=None):
     if orig_audio is not None and random.random() < 0.5:
         seg_len = int(0.05 * sample_rate)
         start = random.randint(0, T - seg_len)
-        augmented[:, start:start + seg_len] = orig_audio[:, start:start + seg_len]
+        augmented[:, :, start:start + seg_len] = orig_audio[:, :, start:start + seg_len]
 
     # 4. Neural codec encoding & decoding (EnCodec)
     if random.random() < 0.3:
@@ -74,7 +74,7 @@ def vc_simulated_augmentation(audio, sample_rate=16000, orig_audio=None):
     pred_label = torch.ones(batch_size, n_frames, device=audio.device) # default to 1（watermark frames）
     # 1. No watermark in silent frames (20%)
     if random.random() < 0.2:
-        n_mask = max(1, int(0.1 * n_frames))  # mask 10% frames randomly
+        n_mask = max(1, int(0.30 * n_frames))  # mask 10% frames randomly
         mask_frames = random.sample(range(n_frames), n_mask)
         for f in mask_frames:
             start = f * downsampling_ratios

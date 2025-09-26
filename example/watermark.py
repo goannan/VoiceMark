@@ -16,8 +16,8 @@ def embed_watermark(waveform, sample_rate: int = 16000, message: str = "11111111
 def decode_watermark(waveform, sample_rate: int = 16000):
     try:
         detect_prob, decoded_id = solver.decode_watermark(waveform, sample_rate)
-        if detect_prob < 1e-2:
-            return "No matching watermark found"
+        # if detect_prob < 1e-2:
+        #     return "No matching watermark found"
         return detect_prob, decoded_id
     except ValueError as e:
         return str(e)

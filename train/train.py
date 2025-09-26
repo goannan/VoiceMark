@@ -217,9 +217,14 @@ class WMTrainer(nn.Module):
                 message = watermark.unsqueeze(0).repeat(batch_size, 1)
 
                 # ------------------- Generator forward -------------------
+
                 _, wm_audio, acoustic, acoustic_wm = self.generator(
                     ori_audio, message=message, msg_processor=self.msg_processor
                 )
+
+                min_len = min(ori_audio.shape[-1], wm_audio.shape[-1])
+                ori_audio = ori_audio[..., :min_len]
+                wm_audio = wm_audio[..., :min_len]
 
                 # ------------------- Audio losses -------------------
                 loss_mel = mel_loss(ori_audio, wm_audio, **self.mel_kwargs) * self.mel_loss_lambda
@@ -267,19 +272,19 @@ class WMTrainer(nn.Module):
         # ------------------- Logging per batch -------------------
         if self.is_main:
             self.log({
-                f"val/mel_loss": avg_mel_loss.item(),
-                f"val/cos_loss": avg_cos_loss.item(),
-                f"val/adv_loss": avg_adv_loss.item(),
-                f"val/decoding_loss": avg_dec_loss.item(),
-                f"val/vad_loss": avg_vad_loss.item(),
-                f"val/total_loss": (avg_mel_loss + avg_cos_loss + avg_adv_loss + avg_dec_loss + avg_vad_loss).item()
-            }, step=self.steps)
+                f"val/mel_loss": avg_mel_loss,
+                f"val/cos_loss": avg_cos_loss,
+                f"val/adv_loss": avg_adv_loss,
+                f"val/decoding_loss": avg_dec_loss,
+                f"val/vad_loss": avg_vad_loss,
+                f"val/total_loss": avg_mel_loss + avg_cos_loss + avg_adv_loss + avg_dec_loss + avg_vad_loss
+            }, step=self.steps.item())
 
         # ------------------- Logging first few audios -------------------
         if i < self.showpiece_num and self.is_main:
-            self.log({f'groundtruth/x_{self.steps}': ori_audio[0].cpu()}, type='audio',
+            self.log({f'groundtruth/x_{self.steps.item()}': ori_audio[0].cpu()}, type='audio',
                      sample_rate=self.sample_rate, step=int(self.steps.item()))
-            self.log({f'generate/x_hat_{self.steps}': wm_audio[0].cpu()}, type='audio',
+            self.log({f'generate/x_hat_{self.steps.item()}': wm_audio[0].cpu()}, type='audio',
                      sample_rate=self.sample_rate, step=int(self.steps.item()))
 
         return avg_mel_loss, avg_cos_loss, avg_adv_loss, avg_dec_loss, avg_vad_loss
@@ -315,6 +320,10 @@ class WMTrainer(nn.Module):
                     ori_audio, message=message, msg_processor=self.msg_processor.to(self.device)
                 )
                 # t_embedder = time.time() - t0
+
+                min_len = min(ori_audio.shape[-1], wm_audio.shape[-1])
+                ori_audio = ori_audio[..., :min_len]
+                wm_audio = wm_audio[..., :min_len]
 
                 # ------------------- Train Discriminators -------------------
                 # t0 = time.time()
@@ -404,7 +413,6 @@ class WMTrainer(nn.Module):
                     # ------------------- Validation & Save -------------------
                     if steps % self.save_model_steps == 0 and steps != 0:
                     # if steps % 10 == 0 and steps != 0:
-                        val_epoch = steps // self.save_model_steps
                         val_mel, val_cos, val_adv, val_dec, val_vad = self.validate()
                         self.save(
                             self.results_folder / f'WatermarkTrainer_{steps:08d}.pt',

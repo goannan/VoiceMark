@@ -5,8 +5,8 @@ from infer import (
 
 
 solver = WatermarkSolver()
-# solver.load_model(checkpoint_dir="../", checkpoint_name="voicemark.pth", strict=True)
-solver.load_model(checkpoint_dir="../", checkpoint_name="train/Log/spt_base/WatermarkTrainer_00001000.pt", strict=True)
+solver.load_model(checkpoint_dir="../", checkpoint_name="voicemark.pth", strict=True)
+# solver.load_model(checkpoint_dir="../", checkpoint_name="train/Log/spt_base/WatermarkTrainer_00001000.pt", strict=True)
 
 
 def embed_watermark(waveform, sample_rate: int = 16000, message: str = "1111111100000000"):

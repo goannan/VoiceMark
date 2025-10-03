@@ -11,9 +11,6 @@ def spectral_normalize_torch(magnitudes):
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
     return torch.log(torch.clamp(x, min=clip_val) * C)
 
-mel_basis = {}
-hann_window = {}
-
 # def mel_spectrogram(y, n_fft, num_mels, sample_rate, hop_size, win_size, fmin, fmax, center=False):
 #
 #     n_fft = int(n_fft)
@@ -42,6 +39,9 @@ hann_window = {}
 #
 #     return spec
 
+mel_basis = {}
+hann_window = {}
+
 def mel_spectrogram(y, n_fft, num_mels, sample_rate, hop_size, win_size, fmin, fmax, center=False):
     n_fft = int(n_fft)
     num_mels = int(num_mels)
@@ -52,7 +52,7 @@ def mel_spectrogram(y, n_fft, num_mels, sample_rate, hop_size, win_size, fmin, f
     fmax = float(fmax)
 
     global mel_basis, hann_window
-    key = f"{fmax}_{y.device}"
+    key = f"{fmax}_{win_size}_{y.device}"
     if key not in mel_basis:
         mel_transform = torchaudio.transforms.MelScale(
             n_mels=num_mels,
@@ -64,7 +64,10 @@ def mel_spectrogram(y, n_fft, num_mels, sample_rate, hop_size, win_size, fmin, f
             mel_scale='htk'
         )
         mel_basis[key] = mel_transform.fb.float().T.to(y.device)
+    
+    if key not in hann_window:
         hann_window[key] = torch.hann_window(win_size).to(y.device)
+
 
     # Pad waveform
     y = torch.nn.functional.pad(y.unsqueeze(1),
@@ -200,7 +203,7 @@ def mel_loss(x, x_hat, **kwargs):
 
     length = min(x_mel.size(2), x_hat_mel.size(2))
 
-    return torch.nn.functional.l1_loss(x_mel[:, :, :length], x_hat_mel[:, :, :length])
+    return torch.nn.functional.l1_loss(x_mel[..., :length], x_hat_mel[..., :length])
 
 def feature_loss(fmap_r, fmap_g):
     loss = 0

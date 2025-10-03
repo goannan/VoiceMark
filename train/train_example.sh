@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 echo "Project root: $PROJECT_ROOT"
 
 CONFIG="config/spt_base_cfg.json"
-AUDIO_DIR="D:/dataset/VCTK-Corpus-0.92/wav48_silence_trimmed"
+AUDIO_DIR="../../../dataset/wav48_silence_trimmed"
 
 
 # NPROC_PER_NODE=4

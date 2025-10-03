@@ -104,8 +104,24 @@ class WMTrainer(nn.Module):
         self.mel_loss_lambda = cfg.get('mel_loss_lambda')
         self.adv_loss_lambda = cfg.get('adv_loss_lambda')
         self.dec_loss_lambda = cfg.get('dec_loss_lambda')
-        self.mel_kwargs = {'n_fft': cfg.get('n_fft'), 'num_mels': cfg.get('num_mels'), 'sample_rate': self.sample_rate,
-                           'hop_size': cfg.get('hop_size'), 'win_size': cfg.get('win_size'), 'fmin': cfg.get('fmin'),
+        self.multi_scale_mel_loss_lambdas = cfg.get('multi_scale_mel_loss_lambdas')
+        self.multi_scale_mel_loss_kwargs_list = []
+        mult = 1
+        for i in range(len(self.multi_scale_mel_loss_lambdas)):
+            self.multi_scale_mel_loss_kwargs_list.append({'n_fft': cfg.get('n_fft') // mult,
+                                                           'num_mels': cfg.get('num_mels'), 
+                                                           'sample_rate': self.sample_rate,
+                                                           'hop_size': cfg.get('hop_size') // mult, 
+                                                           'win_size': cfg.get('win_size') // mult, 
+                                                           'fmin': cfg.get('fmin'),
+                                                           'fmax': cfg.get('fmax')})
+            mult = mult * 2
+        self.mel_kwargs = {'n_fft': cfg.get('n_fft'), 
+                           'num_mels': cfg.get('num_mels'), 
+                           'sample_rate': self.sample_rate,
+                           'hop_size': cfg.get('hop_size'), 
+                           'win_size': cfg.get('win_size'), 
+                           'fmin': cfg.get('fmin'),
                            'fmax': cfg.get('fmax')}
 
         self.msg_processor = WMEmbedder(
@@ -149,12 +165,11 @@ class WMTrainer(nn.Module):
         self.scheduler_generator = CosineAnnealingLR(self.optim_generator, T_max=num_train_steps)
         self.scheduler_discriminator = CosineAnnealingLR(self.optim_discriminators, T_max=num_train_steps)
 
-        self.generator, self.optim_generator, self.scheduler_generator, self.dl, self.valid_dl = self.accelerator.prepare(
-            self.generator, self.optim_generator, self.scheduler_generator, self.dl, self.valid_dl
+        self.generator, self.optim_generator, self.optim_discriminators, self.scheduler_generator, self.scheduler_discriminator, self.dl, self.valid_dl = self.accelerator.prepare(
+            self.generator, self.optim_generator, self.optim_discriminators, self.scheduler_generator, self.scheduler_discriminator, self.dl, self.valid_dl
         )
 
         self.discriminators = {k: self.accelerator.prepare(v) for k, v in self.discriminators.items()}
-        self.optim_discriminators = self.accelerator.prepare(self.optim_discriminators)
 
     @property
     def is_main(self):
@@ -165,7 +180,10 @@ class WMTrainer(nn.Module):
         return self.accelerator.device
 
     def log(self, values: dict, step, type=None, **kwargs):
-        if type == 'audio':
+        if type == 'figure':
+            for k, v in values.items():
+                self.writer.add_figure(k, v, global_step=step)
+        elif type == 'audio':
             for k, v in values.items():
                 self.writer.add_audio(k, v, global_step=step, **kwargs)
         else:
@@ -227,10 +245,10 @@ class WMTrainer(nn.Module):
                 wm_audio = wm_audio[..., :min_len]
 
                 # ------------------- Audio losses -------------------
-                loss_mel = mel_loss(ori_audio, wm_audio, **self.mel_kwargs) * self.mel_loss_lambda
-                min_len = min(acoustic_wm.shape[2], acoustic.shape[2])
-                acoustic_wm_aligned = acoustic_wm[:, :, :min_len]
-                acoustic_aligned = acoustic[:, :, :min_len]
+                loss_mel = sum(map(lambda mel_k:mel_k[0] * mel_loss(ori_audio, wm_audio, **mel_k[1]), zip(self.multi_scale_mel_loss_lambdas, self.multi_scale_mel_loss_kwargs_list))) * self.mel_loss_lambda
+                min_len = min(acoustic_wm.shape[-1], acoustic.shape[-1])
+                acoustic_wm_aligned = acoustic_wm[..., :min_len]
+                acoustic_aligned = acoustic[..., :min_len]
                 loss_cos = cos_loss(acoustic_wm_aligned, acoustic_aligned) * self.cos_loss_lambda
 
                 # ------------------- Adversarial loss -------------------
@@ -251,7 +269,7 @@ class WMTrainer(nn.Module):
 
                     # ---------------- Train vad loss --------------------------
                     min_lens = min(logits.shape[-1], vad_labels.shape[-1])
-                    loss_vad = vad_based_loss(logits[:, :min_lens], vad_labels[:, :min_lens],
+                    loss_vad = vad_based_loss(logits[..., :min_lens], vad_labels[..., :min_lens],
                                               from_logits=True) * self.vad_loss_lambda
 
                 # ------------------- Accumulate losses -------------------
@@ -261,6 +279,20 @@ class WMTrainer(nn.Module):
                 total_dec_loss += loss_dec.item()
                 total_vad_loss += loss_vad.item()
                 num += ori_audio.size(0)
+
+                # ------------------- Logging first few audios -------------------
+                if i < self.showpiece_num and self.is_main:
+                    self.log({f'groundtruth/x_{self.steps.item()}_{i}': ori_audio[0].cpu().numpy()}, type='audio',
+                            sample_rate=self.sample_rate, step=int(self.steps.item()))
+                    x_spec = mel_spectrogram(ori_audio.squeeze(1), **self.mel_kwargs)
+                    self.log({f'groundtruth/x_spec_{self.steps.item()}_{i}': plot_spectrogram(x_spec[0].cpu().numpy())}, type='figure',
+                            step=int(self.steps.item()))
+                    
+                    self.log({f'generate/x_hat_{self.steps.item()}_{i}': wm_audio[0].cpu().numpy()}, type='audio',
+                            sample_rate=self.sample_rate, step=int(self.steps.item()))
+                    x_hat_spec = mel_spectrogram(wm_audio.squeeze(1), **self.mel_kwargs)
+                    self.log({f'generate/x_hat_spec_{self.steps.item()}_{i}': plot_spectrogram(x_hat_spec[0].cpu().numpy())}, type='figure',
+                            step=int(self.steps.item()))
 
         # ------------------- Compute average losses -------------------
         avg_mel_loss = total_mel_loss / num
@@ -279,13 +311,6 @@ class WMTrainer(nn.Module):
                 f"val/vad_loss": avg_vad_loss,
                 f"val/total_loss": avg_mel_loss + avg_cos_loss + avg_adv_loss + avg_dec_loss + avg_vad_loss
             }, step=self.steps.item())
-
-        # ------------------- Logging first few audios -------------------
-        if i < self.showpiece_num and self.is_main:
-            self.log({f'groundtruth/x_{self.steps.item()}': ori_audio[0].cpu()}, type='audio',
-                     sample_rate=self.sample_rate, step=int(self.steps.item()))
-            self.log({f'generate/x_hat_{self.steps.item()}': wm_audio[0].cpu()}, type='audio',
-                     sample_rate=self.sample_rate, step=int(self.steps.item()))
 
         return avg_mel_loss, avg_cos_loss, avg_adv_loss, avg_dec_loss, avg_vad_loss
 
@@ -334,19 +359,25 @@ class WMTrainer(nn.Module):
                     for real_pred, fake_pred in zip(real_preds_list, fake_preds_list):
                         loss_D += adversarial_loss_d(real_pred, fake_pred)
                 self.accelerator.backward(loss_D)
+
+                # gradient clipping for Discriminators
+                # max_grad_norm = 10.0
+                # for d in self.discriminators.values():
+                #     torch.nn.utils.clip_grad_norm_(d.parameters(), max_norm=max_grad_norm)
                 self.optim_discriminators.step()
                 # t_discriminator = time.time() - t0
 
                 # ------------------- Train mel loss -------------------
                 # t0 = time.time()
-                loss_mel = mel_loss(ori_audio, wm_audio, **self.mel_kwargs) * self.mel_loss_lambda
+                # loss_mel = mel_loss(ori_audio, wm_audio, **self.mel_kwargs) * self.mel_loss_lambda
+                loss_mel = sum(map(lambda mel_k:mel_k[0] * mel_loss(ori_audio, wm_audio, **mel_k[1]), zip(self.multi_scale_mel_loss_lambdas, self.multi_scale_mel_loss_kwargs_list))) * self.mel_loss_lambda
                 # t_mel = time.time() - t0
 
                 # ------------------ Train cos loss ---------------------
-                # t0 = time.time()
-                min_len = min(acoustic_wm.shape[2], acoustic.shape[2])
-                acoustic_wm_aligned = acoustic_wm[:, :, :min_len]
-                acoustic_aligned = acoustic[:, :, :min_len]
+                t0 = time.time()
+                min_len = min(acoustic_wm.shape[-1], acoustic.shape[-1])
+                acoustic_wm_aligned = acoustic_wm[..., :min_len]
+                acoustic_aligned = acoustic[..., :min_len]
                 loss_cos = cos_loss(acoustic_wm_aligned, acoustic_aligned) * self.cos_loss_lambda
                 # t_cos = time.time() - t0
 
@@ -377,7 +408,7 @@ class WMTrainer(nn.Module):
                 # ---------------- Train vad loss --------------------------
                 # t0 = time.time()
                 min_lens = min(logits.shape[-1], vad_labels.shape[-1])
-                loss_vad = vad_based_loss(logits[:, :min_lens], vad_labels[:, :min_lens], from_logits=True) * self.vad_loss_lambda
+                loss_vad = vad_based_loss(logits[..., :min_lens], vad_labels[..., :min_lens], from_logits=True) * self.vad_loss_lambda
                 # t_vad = time.time() - t0
 
                 # ---------------- accumulate total loss ---------------------
@@ -385,6 +416,22 @@ class WMTrainer(nn.Module):
 
                 # Use accelerator backward
                 self.accelerator.backward(total_loss)
+
+                # ---------------- gradient clipping for Generator ---------------------
+                # max_grad_norm = 10.0  # 
+                # torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=max_grad_norm)
+
+                total_norm = 0
+                for p in self.generator.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+
+                if self.is_main and steps % 100 == 0:
+                    print(f"[Step {steps}] Grad Norm = {total_norm:.4f}")
+                    self.log({"train/grad_norm": total_norm}, step=steps)
+
                 self.optim_generator.step()
 
                 # ------------------- Scheduler step -------------------
@@ -392,6 +439,13 @@ class WMTrainer(nn.Module):
                 self.scheduler_generator.step()
                 self.scheduler_discriminator.step()
                 # t_scheduler = time.time() - t0
+
+                for param_group in self.optim_generator.param_groups:
+                    lr_g = param_group["lr"]
+                for param_group in self.optim_discriminators.param_groups:
+                    lr_d = param_group["lr"]
+
+                self.log({"lr/generator": lr_g, "lr/discriminator": lr_d}, step=steps)
 
                 # ------------------- Logging -------------------
                 if self.is_main:

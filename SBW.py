@@ -10,9 +10,9 @@ class SBW(nn.Module):
         super().__init__()
         self.nbits = 16
         config_path = (
-            "D:/programs/VoiceMark/STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json"
+            "../STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json"
         )
-        ckpt_path = "D:/programs/VoiceMark/STmodels/pretrained_model/SpeechTokenizer.pt"
+        ckpt_path = "../STmodels/pretrained_model/SpeechTokenizer.pt"
         self.st_model = SpeechTokenizer.load_from_checkpoint(config_path, ckpt_path)
         self.msg_processor = WMEmbedder(
             nbits=16,

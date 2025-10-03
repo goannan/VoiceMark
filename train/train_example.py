@@ -9,7 +9,6 @@ from pathlib import Path
 import torch
 import torchaudio
 from tqdm import tqdm
-import os
 import numpy as np
 from train import WMTrainer
 import warnings
@@ -39,22 +38,24 @@ if __name__ == '__main__':
     valid_file_list = cfg.get('valid_files')
     sample_rate = cfg.get('sample_rate')
     segment_size = cfg.get('segment_size')
-
     if not (os.path.exists(train_file_list) and os.path.exists(valid_file_list)):
-        for i, audio_file in tqdm(enumerate(file_list)):
+        try:
+            for i, audio_file in tqdm(enumerate(file_list)):
 
-            wav, sr = torchaudio.load(audio_file)
-            if sr != sample_rate:
-                wav = torchaudio.functional.resample(wav, sr, sample_rate)
-            if wav.size(-1) < segment_size:
-                wav = torch.nn.functional.pad(wav, (0, segment_size - wav.size(-1)), 'constant')
+                wav, sr = torchaudio.load(audio_file)
+                if sr != sample_rate:
+                    wav = torchaudio.functional.resample(wav, sr, sample_rate)
+                if wav.size(-1) < segment_size:
+                    wav = torch.nn.functional.pad(wav, (0, segment_size - wav.size(-1)), 'constant')
 
-            if i < valid_set_size:
-                with open(valid_file_list, 'a+') as f:
-                    f.write(f'{audio_file}\n')
-            else:
-                with open(train_file_list, 'a+') as f:
-                    f.write(f'{audio_file}\n')
+                if i < valid_set_size:
+                    with open(valid_file_list, 'a+') as f:
+                        f.write(f'{audio_file}\n')
+                else:
+                    with open(train_file_list, 'a+') as f:
+                        f.write(f'{audio_file}\n')
+        except Exception as e:
+            print(f"Error in processing {audio_file}, error message: {e}")
     config_path = (
         "../STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json"
     )

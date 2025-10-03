@@ -144,8 +144,26 @@ class SpeechTokenizer(nn.Module):
         # )
 
         acoustic_wm = sum(msg_processor(x, message) for x in subset)
+        
+        # # 固定选 vq1 (即第一个元素)
+        # fixed_layer = subset[0]
 
-        acoustic = e - quantized_list[0].to(device)  # quantized_list[0] 也要在 GPU
+        # # 其余层里随机选 3 个
+        # other_layers = subset[1:]
+        # selected_layers = random.sample(other_layers, k=min(3, len(other_layers)))
+
+        # # 合并：vq1 必定嵌入，另外 3 个随机层嵌入
+        # selected_for_processing = [fixed_layer] + selected_layers
+        # selected_ids = set(id(x) for x in selected_for_processing)
+
+        # # 遍历 subset，选中的层嵌入水印，否则保持原样
+        # acoustic_wm = sum(
+        #     msg_processor(x, message) if id(x) in selected_ids else x
+        #     for x in subset
+        # )
+
+        # acoustic = e - quantized_list[0].to(device)  # quantized_list[0] 也要在 GPU
+        acoustic = quantized_full - quantized_list[0].to(device)  # quantized_list[0] 也要在 GPU
 
         # e_wm = acoustic_wm
         e_wm = quantized_list[0].to(device) + acoustic_wm

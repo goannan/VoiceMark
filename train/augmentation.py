@@ -73,13 +73,14 @@ def vc_simulated_augmentation(audio, sample_rate=16000, orig_audio=None):
     n_frames = augmented.shape[-1] // downsampling_ratios  # number of frames 50 steps per audio
     pred_label = torch.ones(batch_size, n_frames, device=audio.device) # default to 1（watermark frames）
     # 1. No watermark in silent frames (20%)
-    if random.random() < 0.2:
-        n_mask = max(1, int(0.30 * n_frames))  # mask 10% frames randomly
-        mask_frames = random.sample(range(n_frames), n_mask)
-        for f in mask_frames:
+    # if random.random() < 0.2:
+    #     n_mask = max(1, int(0.30 * n_frames))  # mask 30% frames randomly
+    #     mask_frames = random.sample(range(n_frames), n_mask)
+    for f in range(n_frames):
+        if random.random() < 0.2:
             start = f * downsampling_ratios
             end = start + downsampling_ratios
-            augmented[:, :, start:end] = 0.0
-            pred_label[:, f] = 0
+            augmented[..., start:end] = 0.0
+            pred_label[..., f] = 0
 
     return augmented, pred_label

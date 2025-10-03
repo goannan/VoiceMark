@@ -6,3 +6,6 @@ __pycache__/
 # 可以顺便忽略日志、临时文件
 *.log
 train/Log/
+train/logs/
+
+venv_3.12/

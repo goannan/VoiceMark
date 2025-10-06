@@ -369,12 +369,11 @@ class WMTrainer(nn.Module):
 
                 # ------------------- Train mel loss -------------------
                 # t0 = time.time()
-                # loss_mel = mel_loss(ori_audio, wm_audio, **self.mel_kwargs) * self.mel_loss_lambda
                 loss_mel = sum(map(lambda mel_k:mel_k[0] * mel_loss(ori_audio, wm_audio, **mel_k[1]), zip(self.multi_scale_mel_loss_lambdas, self.multi_scale_mel_loss_kwargs_list))) * self.mel_loss_lambda
                 # t_mel = time.time() - t0
 
                 # ------------------ Train cos loss ---------------------
-                t0 = time.time()
+                # t0 = time.time()
                 min_len = min(acoustic_wm.shape[-1], acoustic.shape[-1])
                 acoustic_wm_aligned = acoustic_wm[..., :min_len]
                 acoustic_aligned = acoustic[..., :min_len]

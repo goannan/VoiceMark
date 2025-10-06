@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 项目根目录
+# root directory of the project
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 echo "Project root: $PROJECT_ROOT"
 

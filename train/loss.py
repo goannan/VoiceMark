@@ -74,7 +74,6 @@ def mel_spectrogram(y, n_fft, num_mels, sample_rate, hop_size, win_size, fmin, f
                                 (int((n_fft-hop_size)/2), int((n_fft-hop_size)/2)),
                                 mode='reflect').squeeze(1)
 
-    # 返回复数张量
     spec_complex = torch.stft(
         y, n_fft,
         hop_length=hop_size,
@@ -84,15 +83,14 @@ def mel_spectrogram(y, n_fft, num_mels, sample_rate, hop_size, win_size, fmin, f
         pad_mode='reflect',
         normalized=False,
         onesided=True,
-        return_complex=True  # 改成 True，返回复数张量
+        return_complex=True  
     )
 
-    # 如果你需要老格式（实部和虚部分开）
-    spec = torch.view_as_real(spec_complex)  # shape: (..., 2)，最后一维是 [real, imag]
-    # 计算幅度谱
+    spec = torch.view_as_real(spec_complex)  # shape: (..., 2)， [real, imag]
+
     spec = torch.sqrt(spec[..., 0]**2 + spec[..., 1]**2 + 1e-9)
 
-    # 转成 Mel
+    # trans to Mel
     spec = torch.matmul(mel_basis[key], spec)
     spec = spectral_normalize_torch(spec)
 
@@ -125,8 +123,8 @@ def decoding_loss(w_hat: torch.Tensor, w_true: torch.Tensor) -> torch.Tensor:
     loss : torch.Tensor
         Scalar loss
     """
-    # 使用 nn.CrossEntropyLoss，需要将 w_hat 形状调整为 (batch*n_bits, n_classes)
-    # w_true 调整为 (batch*n_bits)
+    # Use nn.CrossEntropyLoss needs to change w_hat.shape to (batch*n_bits, n_classes)
+    # w_true -> (batch*n_bits)
     batch, n_bits, n_classes = w_hat.shape
     w_hat_flat = w_hat.view(batch * n_bits, n_classes)
     w_true_flat = w_true.view(batch * n_bits)
@@ -254,7 +252,7 @@ def cos_loss(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tenso
     # cosine similarity: (B,)
     cos_sim = F.cosine_similarity(x_flat, y_flat, dim=1, eps=eps)
 
-    # loss = 1 - cosine similarity (越接近 1 越好)
+    # loss = 1 - cosine similarity (more close to 1 means more similar)
     loss = 1 - cos_sim
 
     # return mean over batch
@@ -263,17 +261,17 @@ def cos_loss(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-8) -> torch.Tenso
 def adversarial_loss_d(real_preds, fake_preds):
     """
     discriminator loss
-    real_preds: D(x) 输出 (真实语音输入判别器的结果)
-    fake_preds: D(x_hat) 输出 (带水印语音输入判别器的结果)
+    real_preds: D(x) (the output of real audio input to discriminator)
+    fake_preds: D(x_hat) (the output of discriminator when fed watermarked audio)
     """
-    loss_real = torch.mean((real_preds - 1) ** 2)  # 真音频希望输出 1
-    loss_fake = torch.mean(fake_preds ** 2)        # 假音频希望输出 0
+    loss_real = torch.mean((real_preds - 1) ** 2)  # real audio hopes to output 1
+    loss_fake = torch.mean(fake_preds ** 2)        # fake audio hopes to output 0
     return loss_real + loss_fake
 
 
 def adversarial_loss_g(fake_preds):
     """
     generator adversarial loss
-    fake_preds: D(x_hat) 输出 (带水印语音输入判别器的结果)
+    fake_preds: D(x_hat) output (the output of discriminator when fed watermarked audio)
     """
-    return torch.mean((fake_preds - 1) ** 2)  # 生成器希望假音频也被判别为真
+    return torch.mean((fake_preds - 1) ** 2)  # generator hopes discriminator outputs 1 for its fake audio

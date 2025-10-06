@@ -2,7 +2,7 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
-# initial pyenv（关键）
+# initial pyenv
 # export PYENV_ROOT="$HOME/mrnas04home/.pyenv"
 # [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
 # eval "$(pyenv init - bash)"

@@ -26,6 +26,16 @@ from tqdm import tqdm
 from accelerate import Accelerator, DistributedType, DistributedDataParallelKwargs, DataLoaderConfiguration
 from augmentation import vc_simulated_augmentation
 import datetime
+# import random
+# from losses import MultiScaleMelSpectrogramLoss
+# from adversarial import (
+#     AdversarialLoss,
+#     get_adv_criterion,
+#     get_real_criterion,
+#     get_fake_criterion,
+#     FeatureMatchingLoss,
+#     MultiScaleDiscriminator,
+# )
 # helpers
 
 def exists(val):
@@ -92,7 +102,10 @@ class WMTrainer(nn.Module):
         self.discriminators = discriminators
         self.batch_size = cfg.get("batch_size")
         self.epochs = cfg.get("epochs")
+        # lr
         self.lr = cfg.get("learning_rate")
+        self.initial_lr = cfg.get("intial_learning_rate")
+
         self.num_warmup_steps = cfg.get("num_warmup_steps")
         self.steps = torch.Tensor([0])
         self.best_dev_loss = float('inf')
@@ -128,7 +141,7 @@ class WMTrainer(nn.Module):
             nbits=16,
             input_dim=1024,
             nchunk_size=4,
-        )
+        ).to(self.device)
         self.detector = WMDetector(
             1024,
             16,
@@ -156,7 +169,15 @@ class WMTrainer(nn.Module):
         self.valid_dl = get_dataloader(self.valid_ds, batch_size=1, shuffle=False, drop_last=False, num_workers=1)
 
         # optimizers
-        self.optim_generator = get_optimizer(generator.parameters(), lr=self.lr, wd=cfg.get("wd"), betas=cfg.get("betas"))
+        # self.optim_generator = get_optimizer(generator.parameters(), lr=self.lr, wd=cfg.get("wd"), betas=cfg.get("betas"))
+        # train msg_processor and detector only
+        self.trainable_params = list(self.msg_processor.parameters()) + list(self.detector.parameters())
+        self.optim_generator = get_optimizer(
+            self.trainable_params,
+            lr=self.lr,
+            wd=cfg.get("wd"),
+            betas=cfg.get("betas")
+        )
         self.optim_discriminators = get_optimizer(itertools.chain(*[d.parameters() for d in discriminators.values()]),
                                                   lr=self.lr, wd=cfg.get("wd"), betas=cfg.get("betas"))
 
@@ -171,6 +192,23 @@ class WMTrainer(nn.Module):
 
         self.discriminators = {k: self.accelerator.prepare(v) for k, v in self.discriminators.items()}
 
+        hps = {"num_train_steps": num_train_steps, "num_warmup_steps": self.num_warmup_steps, "learning_rate": self.lr, "initial_learning_rate": self.initial_lr, "epochs": self.epochs}
+        self.accelerator.init_trackers("SpeechTokenizer", config=hps)
+
+        
+        # self.adv_losses = {}
+        # for name, d in self.discriminators.items():
+        #     self.adv_losses[name] = AdversarialLoss(
+        #         adversary=d.to(self.device),
+        #         optimizer=self.optim_discriminators, 
+        #         accelerator=self.accelerator,
+        #         loss=get_adv_criterion('mse'),
+        #         loss_real=get_real_criterion('mse'),
+        #         loss_fake=get_fake_criterion('mse'),
+        #         loss_feat=FeatureMatchingLoss(),
+        #         normalize=True
+        #     )
+
     @property
     def is_main(self):
         return self.accelerator.is_main_process
@@ -178,6 +216,12 @@ class WMTrainer(nn.Module):
     @property
     def device(self):
         return self.accelerator.device
+
+    def warmup(self, step):
+        if step < self.num_warmup_steps:
+            return self.initial_lr + (self.lr - self.initial_lr) * step / self.num_warmup_steps
+        else:
+            return self.lr
 
     def log(self, values: dict, step, type=None, **kwargs):
         if type == 'figure':
@@ -235,21 +279,39 @@ class WMTrainer(nn.Module):
                 message = watermark.unsqueeze(0).repeat(batch_size, 1)
 
                 # ------------------- Generator forward -------------------
-
+                # embedding watermark
                 _, wm_audio, acoustic, acoustic_wm = self.generator(
                     ori_audio, message=message, msg_processor=self.msg_processor
                 )
-
                 min_len = min(ori_audio.shape[-1], wm_audio.shape[-1])
                 ori_audio = ori_audio[..., :min_len]
                 wm_audio = wm_audio[..., :min_len]
 
-                # ------------------- Audio losses -------------------
+                # ------------------- mel loss -------------------
                 loss_mel = sum(map(lambda mel_k:mel_k[0] * mel_loss(ori_audio, wm_audio, **mel_k[1]), zip(self.multi_scale_mel_loss_lambdas, self.multi_scale_mel_loss_kwargs_list))) * self.mel_loss_lambda
+                # criterion = MultiScaleMelSpectrogramLoss(
+                #     sample_rate=16000,
+                #     range_start=6,
+                #     range_end=11,   # 64~2048 FFT
+                #     n_mels=80,
+                #     f_min=0,
+                #     f_max=8000,     # 注意这里最好设为采样率的一半
+                # )
+                # loss_mel = criterion(ori_audio, wm_audio) * self.mel_loss_lambda
+
+                # ------------------ Cosine loss ---------------------
                 min_len = min(acoustic_wm.shape[-1], acoustic.shape[-1])
                 acoustic_wm_aligned = acoustic_wm[..., :min_len]
                 acoustic_aligned = acoustic[..., :min_len]
                 loss_cos = cos_loss(acoustic_wm_aligned, acoustic_aligned) * self.cos_loss_lambda
+
+                # # ------------------- Adversarial loss(generator loss) -------------------
+                # loss_adv = 0.0
+                # for name, adv_loss_obj in self.adv_losses.items():
+                #     # calculate generator loss
+                #     g_loss, feat_loss = adv_loss_obj(wm_audio, ori_audio)
+                #     loss_adv += g_loss
+                # loss_adv = loss_adv * self.adv_loss_lambda
 
                 # ------------------- Adversarial loss -------------------
                 loss_adv = 0.0
@@ -260,17 +322,18 @@ class WMTrainer(nn.Module):
                     fake_preds_tensor = torch.cat([fp.flatten() for fp in fake_preds_list])
                     loss_adv += adversarial_loss_g(fake_preds_tensor)
 
-                    augmented_audio, vad_labels = vc_simulated_augmentation(wm_audio, sample_rate=self.sample_rate,
-                                                                             orig_audio=ori_audio)
+                # ------------------- before training decoding loss and vad loss, watermarked audio should go through distortion layer.
+                augmented_audio, vad_labels = vc_simulated_augmentation(wm_audio, sample_rate=self.sample_rate,
+                                                                            orig_audio=ori_audio)
 
-                    # ---------------- Train Decoding loss -----------------
-                    logits, chuck_logits = self.detect_watermark(augmented_audio, return_logits=True)
-                    loss_dec = decoding_loss(chuck_logits, bits_to_chunks(message)) * self.dec_loss_lambda
+                # ---------------- Train Decoding loss -----------------
+                logits, chuck_logits = self.detect_watermark(augmented_audio, return_logits=True)
+                loss_dec = decoding_loss(chuck_logits, bits_to_chunks(message)) * self.dec_loss_lambda
 
-                    # ---------------- Train vad loss --------------------------
-                    min_lens = min(logits.shape[-1], vad_labels.shape[-1])
-                    loss_vad = vad_based_loss(logits[..., :min_lens], vad_labels[..., :min_lens],
-                                              from_logits=True) * self.vad_loss_lambda
+                # ----------------  vad loss --------------------------
+                min_lens = min(logits.shape[-1], vad_labels.shape[-1])
+                loss_vad = vad_based_loss(logits[..., :min_lens], vad_labels[..., :min_lens],
+                                        from_logits=True) * self.vad_loss_lambda
 
                 # ------------------- Accumulate losses -------------------
                 total_mel_loss += loss_mel.item()
@@ -282,16 +345,16 @@ class WMTrainer(nn.Module):
 
                 # ------------------- Logging first few audios -------------------
                 if i < self.showpiece_num and self.is_main:
-                    self.log({f'groundtruth/x_{self.steps.item()}_{i}': ori_audio[0].cpu().numpy()}, type='audio',
+                    self.log({f'groundtruth/x_{i}': ori_audio[0].cpu().numpy()}, type='audio',
                             sample_rate=self.sample_rate, step=int(self.steps.item()))
                     x_spec = mel_spectrogram(ori_audio.squeeze(1), **self.mel_kwargs)
-                    self.log({f'groundtruth/x_spec_{self.steps.item()}_{i}': plot_spectrogram(x_spec[0].cpu().numpy())}, type='figure',
+                    self.log({f'groundtruth/x_spec_{i}': plot_spectrogram(x_spec[0].cpu().numpy())}, type='figure',
                             step=int(self.steps.item()))
                     
-                    self.log({f'generate/x_hat_{self.steps.item()}_{i}': wm_audio[0].cpu().numpy()}, type='audio',
+                    self.log({f'generate/x_hat_{i}': wm_audio[0].cpu().numpy()}, type='audio',
                             sample_rate=self.sample_rate, step=int(self.steps.item()))
                     x_hat_spec = mel_spectrogram(wm_audio.squeeze(1), **self.mel_kwargs)
-                    self.log({f'generate/x_hat_spec_{self.steps.item()}_{i}': plot_spectrogram(x_hat_spec[0].cpu().numpy())}, type='figure',
+                    self.log({f'generate/x_hat_spec_{i}': plot_spectrogram(x_hat_spec[0].cpu().numpy())}, type='figure',
                             step=int(self.steps.item()))
 
         # ------------------- Compute average losses -------------------
@@ -318,25 +381,41 @@ class WMTrainer(nn.Module):
         # print(torch.cuda.is_available())  # True
         # print(torch.cuda.current_device())  # 0
         # print(torch.cuda.get_device_name(0))
-        print(f'Training start...')
         self.generator.train()
         for d in self.discriminators.values():
             d.train()
 
         steps = int(self.steps.item())
+        if steps < self.num_warmup_steps:
+            lr = self.warmup(steps)
+            for param_group in self.optim.param_groups:
+                param_group['lr'] = lr
+        else:
+            self.scheduler_discriminator.step()
+            self.scheduler_generator.step()
+            lr = self.scheduler_discriminator.get_last_lr()[0]
         for epoch in range(self.epochs):
             # waveform = [batch, 1, T]
             for i, audio in enumerate(tqdm(self.dl, desc=f"Epoch {epoch}", ncols=100)):
                 # start_batch = time.time()  # Record the start time of the batch
                 # ------------------- Prepare batch -------------------
                 ori_audio = torch.stack(audio).to(self.device)
-                with open("wmpool.txt", 'r') as wmp:
-                    watermark = eval(wmp.readline())
-                # watermark = 16 bits binary
-                watermark = torch.tensor(watermark, dtype=torch.int64).to(self.device)
+                # with open("wmpool.txt", 'r') as wmp:
+                #     watermark = eval(wmp.readline())
+                # # watermark = 16 bits binary
+                # watermark = torch.tensor(watermark, dtype=torch.int64).to(self.device)
+                # batch_size = ori_audio.size(0)
+                # # message = [batch, 16]
+                # message = watermark.unsqueeze(0).repeat(batch_size, 1)
+
+                # random 16-bit watermark/message
                 batch_size = ori_audio.size(0)
-                # message = [batch, 16]
-                message = watermark.unsqueeze(0).repeat(batch_size, 1)
+                n_bits = 16  # 16 bits message
+                message = torch.randint(0, 2, (batch_size, n_bits), dtype=torch.int64).to(self.device)
+
+                # ------------------- Freeze the generator -------------------
+                for param in self.generator.parameters():
+                    param.requires_grad = False
 
                 # ------------------- Embedder forward -------------------
                 # t0 = time.time()
@@ -350,6 +429,21 @@ class WMTrainer(nn.Module):
                 ori_audio = ori_audio[..., :min_len]
                 wm_audio = wm_audio[..., :min_len]
 
+                # # ------------------- Train Discriminators -------------------
+                # loss_D = torch.tensor(0., device=self.device)
+                # for name, adv_loss_obj in self.adv_losses.items():
+                #     # train discriminator
+                #     loss_d = adv_loss_obj.train_adv(wm_audio.detach(), ori_audio)
+                #     loss_D += loss_d
+
+                # # ------------------- Train Generator -------------------
+                # loss_adv = torch.tensor(0., device=self.device)
+                # for name, adv_loss_obj in self.adv_losses.items():
+                #     # calculate generator loss
+                #     g_loss, feat_loss = adv_loss_obj(wm_audio, ori_audio)
+                #     loss_adv += g_loss
+                # loss_adv = loss_adv * self.adv_loss_lambda
+
                 # ------------------- Train Discriminators -------------------
                 # t0 = time.time()
                 self.optim_discriminators.zero_grad()
@@ -359,17 +453,33 @@ class WMTrainer(nn.Module):
                     for real_pred, fake_pred in zip(real_preds_list, fake_preds_list):
                         loss_D += adversarial_loss_d(real_pred, fake_pred)
                 self.accelerator.backward(loss_D)
-
-                # gradient clipping for Discriminators
-                # max_grad_norm = 10.0
-                # for d in self.discriminators.values():
-                #     torch.nn.utils.clip_grad_norm_(d.parameters(), max_norm=max_grad_norm)
                 self.optim_discriminators.step()
                 # t_discriminator = time.time() - t0
+
+                # ------------------- Train Generator -------------------
+                # t0 = time.time()
+                loss_adv = 0.0
+                # Forward through all training discriminators (lightweight)
+                for d in self.discriminators.values():
+                    _, fake_preds_list, _, _ = d(ori_audio, wm_audio)  # Not detached, keep computation graph
+                    # Merge all fake_pred and then compute loss
+                    fake_preds_tensor = torch.cat([fp.flatten() for fp in fake_preds_list])
+                    loss_adv += adversarial_loss_g(fake_preds_tensor)
+                loss_adv = loss_adv * self.adv_loss_lambda
+                # t_generator = time.time() - t0
 
                 # ------------------- Train mel loss -------------------
                 # t0 = time.time()
                 loss_mel = sum(map(lambda mel_k:mel_k[0] * mel_loss(ori_audio, wm_audio, **mel_k[1]), zip(self.multi_scale_mel_loss_lambdas, self.multi_scale_mel_loss_kwargs_list))) * self.mel_loss_lambda
+                # criterion = MultiScaleMelSpectrogramLoss(
+                #     sample_rate=16000,
+                #     range_start=6,
+                #     range_end=11,   # 64~2048 FFT
+                #     n_mels=80,
+                #     f_min=0,
+                #     f_max=8000,     # 注意这里最好设为采样率的一半
+                # )
+                # loss_mel = criterion(ori_audio, wm_audio) * self.mel_loss_lambda
                 # t_mel = time.time() - t0
 
                 # ------------------ Train cos loss ---------------------
@@ -379,20 +489,6 @@ class WMTrainer(nn.Module):
                 acoustic_aligned = acoustic[..., :min_len]
                 loss_cos = cos_loss(acoustic_wm_aligned, acoustic_aligned) * self.cos_loss_lambda
                 # t_cos = time.time() - t0
-
-                # ------------------- Train Generator -------------------
-                # t0 = time.time()
-                self.optim_generator.zero_grad()
-                loss_adv = 0.0
-                # Forward through all training discriminators (lightweight)
-                for d in self.discriminators.values():
-                    _, fake_preds_list, _, _ = d(ori_audio, wm_audio)  # Not detached, keep computation graph
-                    # Merge all fake_pred and then compute loss
-                    fake_preds_tensor = torch.cat([fp.flatten() for fp in fake_preds_list])
-                    loss_adv += adversarial_loss_g(fake_preds_tensor)
-
-                loss_adv = loss_adv * self.adv_loss_lambda
-                # t_generator = time.time() - t0
 
                 # before training decoding loss and vad loss, watermarked audio should go through distortion layer.
                 # add vc simulation augmentation methods
@@ -421,7 +517,7 @@ class WMTrainer(nn.Module):
                 # torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=max_grad_norm)
 
                 total_norm = 0
-                for p in self.generator.parameters():
+                for p in self.msg_processor.parameters():
                     if p.grad is not None:
                         param_norm = p.grad.data.norm(2)
                         total_norm += param_norm.item() ** 2
@@ -429,7 +525,18 @@ class WMTrainer(nn.Module):
 
                 if self.is_main and steps % 100 == 0:
                     print(f"[Step {steps}] Grad Norm = {total_norm:.4f}")
-                    self.log({"train/grad_norm": total_norm}, step=steps)
+                    self.log({"train/embedder_grad_norm": total_norm}, step=steps)
+
+                total_norm = 0
+                for p in self.detector.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+
+                if self.is_main and steps % 100 == 0:
+                    print(f"[Step {steps}] Grad Norm = {total_norm:.4f}")
+                    self.log({"train/detector_grad_norm": total_norm}, step=steps)
 
                 self.optim_generator.step()
 
@@ -480,8 +587,19 @@ class WMTrainer(nn.Module):
                             f'Mel={val_mel:.4f}, Cos={val_cos:.4f}, Adv={val_adv:.4f}, Dec={val_dec:.4f}, Vad={val_vad:.4f} saved.\r'
                         )
 
-                    steps += 1
-                    self.steps = torch.tensor([steps], device=self.device)
+                # Update lr    
+                self.steps += 1
+                steps = int(self.steps.item())               
+                if steps < self.num_warmup_steps:
+                    lr = self.warmup(steps)
+                    for param_group in self.optim_generator.param_groups:
+                        param_group['lr'] = lr
+                    for param_group in self.optim_discriminators.param_groups:
+                        param_group['lr'] = lr
+                else:
+                    self.scheduler_discriminator.step() 
+                    self.scheduler_generator.step() 
+                    lr = self.scheduler_generator.get_last_lr()[0]  
 
     def continue_train(self):
         self.load()

@@ -16,6 +16,11 @@ AUDIO_DIR="../../../dataset/wav48_silence_trimmed"
 # train_example.py \
 #     --config ${CONFIG} \
 
-accelerate launch train_example.py\
-    --config "$PROJECT_ROOT/${CONFIG}"\
-    --audio_dir ${AUDIO_DIR}\
+accelerate launch \
+    --num_processes 1 \
+    --num_machines 1 \
+    --mixed_precision fp16 \
+    --dynamo_backend no \
+    train_example.py \
+    --config "$PROJECT_ROOT/$CONFIG" \
+    --audio_dir "$AUDIO_DIR"

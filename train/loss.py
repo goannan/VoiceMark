@@ -96,6 +96,14 @@ def mel_spectrogram(y, n_fft, num_mels, sample_rate, hop_size, win_size, fmin, f
 
     return spec
 
+def mel_loss(x, x_hat, **kwargs):
+    x_mel = mel_spectrogram(x.squeeze(1), **kwargs)
+    x_hat_mel = mel_spectrogram(x_hat.squeeze(1), **kwargs)
+
+    length = min(x_mel.size(2), x_hat_mel.size(2))
+
+    return torch.nn.functional.l1_loss(x_mel[..., :length], x_hat_mel[..., :length])
+
 def plot_spectrogram(spectrogram):
     fig, ax = plt.subplots(figsize=(10, 2))
     im = ax.imshow(spectrogram, aspect="auto", origin="lower",
@@ -194,14 +202,6 @@ def vad_based_loss(vad_pred: torch.Tensor, vad_label: torch.Tensor, from_logits:
 
     return loss
 
-
-def mel_loss(x, x_hat, **kwargs):
-    x_mel = mel_spectrogram(x.squeeze(1), **kwargs)
-    x_hat_mel = mel_spectrogram(x_hat.squeeze(1), **kwargs)
-
-    length = min(x_mel.size(2), x_hat_mel.size(2))
-
-    return torch.nn.functional.l1_loss(x_mel[..., :length], x_hat_mel[..., :length])
 
 def feature_loss(fmap_r, fmap_g):
     loss = 0
